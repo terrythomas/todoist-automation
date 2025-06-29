@@ -66,7 +66,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # Activate virtual environment and run the script
-./venv/bin/python todoist-automation-schedule-overdue "$@"
+"$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/todoist-automation-schedule-overdue" "$@"
 
 # Log the finish time
 echo "[$(date)] Finished run_schedule.sh" >>"$LOGFILE"
