@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+
+"""
+This script automates the rescheduling of overdue Todoist tasks to the next available weekday.
+It supports a dry-run mode for previewing changes and logs modifications when run via cron.
+Uses a Python virtual environment to isolate dependencies.
+"""
+
+# Import standard and third-party libraries
+import subprocess
+import json
+from datetime import date, timedelta
+import argparse
+import requests
+import os
+import logging
+from dotenv import load_dotenv
+from colorama import Fore, Style, init
+from collections import defaultdict
+import sys
+
+# Initialize colorama for colored terminal output
+init(autoreset=True)
+
+# Check whether the script is running in a cron environment
+def is_cron():
+    return not sys.stdout.isatty()
+
+# Set up daily rotating logs (keeps 7 days of logs)
+from logging.handlers import TimedRotatingFileHandler
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+log_dir = os.path.join(script_dir, "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file_path = os.path.join(log_dir, "todoist_overdue.log")
+
+log_handler = TimedRotatingFileHandler(
+    log_file_path, when="midnight", interval=1, backupCount=7
+)
+log_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(log_handler)
+
+# Load environment variables (including TODOIST_API_TOKEN) from .env file
+load_dotenv()
+
+# Helper function to get the next weekday (skipping weekends)
+def get_next_weekday(d):
+    # 0=Monday, 6=Sunday
+    if d.weekday() == 5:  # Saturday
+        return d + timedelta(days=2)
+    elif d.weekday() == 6:  # Sunday
+        return d + timedelta(days=1)
+    return d
+
+# Parse CLI arguments to support --dry-run
+parser = argparse.ArgumentParser(description="Reschedule overdue Todoist tasks to the next weekday.")
+parser.add_argument("--dry-run", action="store_true", help="Show tasks that would be rescheduled without making changes.")
+args = parser.parse_args()
+
+# Prepare request headers with the Todoist API token
+today = date.today()
+due_date = get_next_weekday(today).isoformat()
+
+headers = {
+    "Authorization": f"Bearer {os.environ['TODOIST_API_TOKEN']}"
+}
+
+# Fetch all overdue tasks
+response = requests.get("https://api.todoist.com/rest/v2/tasks", headers=headers, params={"filter": "overdue"})
+response.raise_for_status()
+overdue_tasks = response.json()
+
+# Fetch all project names and create a lookup dictionary
+project_response = requests.get("https://api.todoist.com/rest/v2/projects", headers=headers)
+project_response.raise_for_status()
+projects = project_response.json()
+project_lookup = {project["id"]: project["name"] for project in projects}
+
+# Organize tasks by project and due date
+grouped_tasks = defaultdict(lambda: defaultdict(list))
+
+modified_count = 0
+# Process each task (reschedule if not in dry-run)
+for task in overdue_tasks:
+    task_id = task.get("id")
+    content = task.get("content", "<no content>")
+    due_obj = task.get("due")
+    if not isinstance(due_obj, dict) or "date" not in due_obj:
+        continue
+    due_string = due_obj.get("date")
+    project = task.get("project_id", "Unknown Project")
+    grouped_tasks[project][due_string].append((task_id, content))
+    if task_id:
+        if not args.dry_run:
+            reschedule_data = {"due_date": due_date}
+            # Send a POST request to update the due date of the task using the official Todoist API
+            res = requests.post(f"https://api.todoist.com/rest/v2/tasks/{task_id}", headers=headers, json=reschedule_data)
+            res.raise_for_status()
+            if is_cron():
+                logging.info(f"Rescheduled task {task_id} ('{content}') from {due_string} to {due_date}")
+            else:
+                print(f"Rescheduling task {task_id}: '{content}' from {due_string} to {due_date}")
+        modified_count += 1
+
+# In dry-run mode: print out the grouped tasks and their proposed changes
+if args.dry_run:
+    if is_cron():
+        logging.info("Running in dry-run mode via cron: suppressing console output.")
+        sys.exit(0)
+    for project, dates in grouped_tasks.items():
+        project_name = project_lookup.get(project, f"Unknown Project ({project})")
+        print(f"{Fore.BLUE}Project: {project_name}{Style.RESET_ALL}")
+        for due_date_str, tasks in sorted(dates.items()):
+            print(f"\t{Fore.YELLOW}Due: {due_date_str}{Style.RESET_ALL}")
+            for task_id, content in tasks:
+                task = next((t for t in overdue_tasks if t.get("id") == task_id), {})
+                deadline_obj = task.get("deadline") if isinstance(task, dict) else None
+                deadline_string = deadline_obj.get("date") if isinstance(deadline_obj, dict) else None
+                print(f"\t\t{Fore.CYAN}Task {task_id}{Style.RESET_ALL}: {Fore.GREEN}{content}{Style.RESET_ALL}" + (f" {Fore.MAGENTA}[Deadline: {deadline_string}]{Style.RESET_ALL}" if deadline_string else ""))
+
+    # Print a summary of the dry-run including counts and target due date
+    formatted_due_date = get_next_weekday(today).strftime("%A, %B %d, %Y")
+    print(f"\nSummary:")
+    print(f"{Fore.GREEN}Tasks that would be modified: {modified_count}{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}Tasks left unmodified: {len(overdue_tasks) - modified_count}{Style.RESET_ALL}")
+    print(f"New due date for modified tasks: {Fore.MAGENTA}{formatted_due_date}{Style.RESET_ALL}")
