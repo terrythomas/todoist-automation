@@ -12,11 +12,26 @@
 # -----------------------------------------------------------------------------
 # Wrapper script to run the Todoist automation script via cron
 
+# Check if script already ran today
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TODAY=$(date +%Y-%m-%d)
+DAILY_LOCK_FILE="$SCRIPT_DIR/.daily_run_$TODAY"
 
-
+# Set up logging first
 LOGDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logs"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/run_schedule_setup.log"
+
+if [ -f "$DAILY_LOCK_FILE" ]; then
+    echo "[$(date)] Script already ran today ($TODAY). Skipping execution." | tee -a "$LOGFILE"
+    exit 0
+fi
+
+# Create the daily lock file
+touch "$DAILY_LOCK_FILE"
+
+# Clean up old lock files (older than 7 days)
+find "$SCRIPT_DIR" -name ".daily_run_*" -mtime +7 -delete 2>/dev/null
 
 # Log the start time and arguments
 echo "[$(date)] Starting run_schedule.sh with args: $@" >>"$LOGFILE"
